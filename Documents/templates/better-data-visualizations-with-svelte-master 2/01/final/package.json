@@ -1,0 +1,31 @@
+{
+  "name": "module-1-final-chart-better-data-visualizations-with-svelte",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+  "build": "vite build",
+  "deploy": "npm run build && gh-pages -d dist"
+},
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^1.0.2",
+    "gh-pages": "^6.3.0",
+    "svelte": "^3.49.0",
+    "svelte-range-slider-pips": "^2.3.1",
+    "vite": "^3.1.0"
+  },
+  "dependencies": {
+    "d3-array": "^3.2.0",
+    "d3-dsv": "^3.0.1",
+    "d3-format": "^3.1.0",
+    "d3-geo": "^3.0.1",
+    "d3-scale": "^4.0.2",
+    "d3-scale-chromatic": "^3.1.0",
+    "date-fns": "^4.1.0",
+    "nouislider": "^15.8.1",
+    "papaparse": "^5.5.2",
+    "path": "^0.12.7"
+  },
+  "keywords": [],
+  "description": ""
+}
