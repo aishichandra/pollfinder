@@ -122,7 +122,7 @@
 
                       <input 
                       type="date" 
-                      id="date-picker-ohio" 
+                      id="date-picker" 
                       class="date-input"
                       bind:value={selectedDate} 
 
@@ -160,19 +160,19 @@
       <div class="keycards">
         <div class="card">
           <h3>{getRowCount(trumpApproval)}</h3>
-          <p>Ohio Senate Poll URLs</p>
+          <p>Trump Approval Polls</p>
         </div>
         <div class="card">
           <h3>{getRowCount(vanceApproval)}</h3>
-          <p>Michigan Senate Poll URLs</p>
+          <p>Vance Approval Polls</p>
         </div>
         <div class="card">
           <h3>{getRowCount(muskApproval)}</h3>
-          <p>Texas Senate Poll URLs</p>
+          <p>Musk Approval Polls</p>
         </div>
         <div class="card">
           <h3>{getRowCount(muskFavorability)}</h3>
-          <p>Texas Senate Poll URLs</p>
+          <p>Musk Favorability Polls</p>
         </div>
 
       </div>
@@ -186,7 +186,6 @@
       </div>
       <Grid data={trumpApproval} columns={columns} />
       <br/>
-      <!-- <p>FiveThirtyEight's <a href="https://projects.fivethirtyeight.com/polls/senate/2024/ohio/" target="_blank">Ohio Polls</a>.</p> -->
 
     </section>
   
