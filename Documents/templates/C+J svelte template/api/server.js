@@ -153,4 +153,5 @@ app.get('/api/health', (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 API server running on http://localhost:${PORT}`);
-});
+});// Clean API deployment Tue Oct 14 16:58:03 EDT 2025
+// Fresh deployment Tue Oct 14 17:06:47 EDT 2025
