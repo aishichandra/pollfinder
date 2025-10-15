@@ -145,6 +145,22 @@ app.get('/', (req, res) => {
   });
 });
 
+// POST /api/notes route
+app.post('/api/notes', async (req, res) => {
+  try {
+    const { id, notes } = req.body;
+    if (!id || !notes) {
+      return res.status(400).json({ error: 'Missing id or notes' });
+    }
+    const notesCollection = db.collection('notes');
+    const result = await notesCollection.insertOne({ id, notes, createdAt: new Date() });
+    res.status(201).json({ success: true, noteId: result.insertedId });
+  } catch (error) {
+    console.error('Error saving note:', error);
+    res.status(500).json({ error: 'Failed to save note' });
+  }
+});
+
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', database: db ? 'connected' : 'disconnected' });
