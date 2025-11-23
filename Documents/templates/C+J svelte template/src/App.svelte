@@ -1,12 +1,15 @@
 <script>
   import { onMount } from 'svelte';
-
+  // Force cache bust for production testing - timestamp: 2024-10-14-20:25
   let data = [];
   let filteredData = [];
   let loading = true;
   let error = null;
+  console.log('Cache bust test:', new Date().toISOString());
+  
 
   const today = new Date();
+  // Use local date for the date picker
   const todayStr = today.getFullYear() + '-' +
                    String(today.getMonth() + 1).padStart(2, '0') + '-' +
                    String(today.getDate()).padStart(2, '0');
@@ -21,11 +24,129 @@
   let sortDirection = 'desc';
 
   // View mode
-  let viewMode = 'table'; // 'table' or 'grouped'
+  let viewMode = 'grouped'; // 'table' or 'grouped'
   let groupedData = {};
+  let collapsedGroups = {}; // key: pollId, value: boolean
+
+  // Grouped view sorting
+  let groupSortColumn = 'added_on';
+  let groupSortDirection = 'desc';
+
+  function toggleGroup(pollId) {
+    collapsedGroups[pollId] = !collapsedGroups[pollId];
+    collapsedGroups = { ...collapsedGroups };
+  }
 
   // Feedback tracking
   let feedback = {}; // key: url+match_poll_id, value: 'correct' or 'incorrect'
+
+  async function fetchData() {
+    // Use environment variable for production API base, fallback to Railway production URL
+    const PROD_API_BASE = import.meta.env.VITE_API_BASE || 'https://pollfinder-production.up.railway.app';
+    
+    // Use Railway API in production, local API in development
+    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const apiUrl = isLocalhost
+      ? 'http://localhost:3001/api/polls'
+      : window.location.hostname.includes('192.168') || window.location.hostname.includes('127.0')
+        ? `http://${window.location.hostname}:3001/api/polls`
+        : `${PROD_API_BASE}/api/polls`;
+    loading = true;
+    error = null;
+
+    try {
+      // Query both today and tomorrow in UTC to ensure we get all local day's data
+      // (since local day can span two UTC days)
+      const [year, month, day] = (dateFilter || todayStr).split('-').map(Number);
+      const localDate = new Date(year, month - 1, day);
+      
+      // Get the UTC dates that could contain this local date
+      const utcDate = localDate.getUTCFullYear() + '-' +
+                      String(localDate.getUTCMonth() + 1).padStart(2, '0') + '-' +
+                      String(localDate.getUTCDate()).padStart(2, '0');
+      
+      // Also query the next UTC day to catch evening local times
+      const nextDay = new Date(localDate);
+      nextDay.setDate(nextDay.getDate() + 1);
+      const nextUtcDate = nextDay.getUTCFullYear() + '-' +
+                          String(nextDay.getUTCMonth() + 1).padStart(2, '0') + '-' +
+                          String(nextDay.getUTCDate()).padStart(2, '0');
+      
+      // Fetch both days and combine
+      const [response1, response2] = await Promise.all([
+        fetch(`${apiUrl}?date=${utcDate}`),
+        fetch(`${apiUrl}?date=${nextUtcDate}`)
+      ]);
+      
+      if (!response1.ok) throw new Error(`HTTP ${response1.status}`);
+      if (!response2.ok) throw new Error(`HTTP ${response2.status}`);
+      
+      const [data1, data2] = await Promise.all([
+        response1.json(),
+        response2.json()
+      ]);
+      
+      const parsed = [...(Array.isArray(data1) ? data1 : []), ...(Array.isArray(data2) ? data2 : [])];
+      
+      if (typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const columns = Object.keys(parsed);
+        const firstColumn = parsed[columns[0]];
+        const numRows = Object.keys(firstColumn).length;
+        data = [];
+        for (let i = 0; i < numRows; i++) {
+          const row = {};
+          columns.forEach(col => (row[col] = parsed[col][i]));
+          data.push(row);
+        }
+      } else if (Array.isArray(parsed)) {
+        data = parsed;
+      }
+
+      console.log('📊 Data before filtering:', data.length, 'items');
+
+      // Remove rows whose extracted poll has no pollster or pollster is 'N/A'
+      data = data.filter(item => {
+        const pollsArray = Array.isArray(item.polls) ? item.polls : (item.polls ? [item.polls] : []);
+        const firstPoll = coercePoll(pollsArray[0]);
+        const hasValidPollster = firstPoll && firstPoll.pollster && firstPoll.pollster !== 'N/A';
+        return hasValidPollster;
+      });
+
+      if (data.length > 0) {
+        const collectionsSet = new Map();
+        data.forEach(item => {
+          extractCollections(item.collections).forEach(label => {
+            const key = label.toLowerCase();
+            if (!collectionsSet.has(key)) collectionsSet.set(key, label);
+          });
+        });
+        uniqueCollections = Array.from(collectionsSet.values()).sort((a, b) => a.localeCompare(b));
+
+        let allColumns = Object.keys(data[0]).filter(f => f !== 'id' && f !== 'num_polls_found' && f !== 'polls_mentioned' && f !== 'collections' && f !== 'feedback' && f !== 'notes');
+        const urlIndex = allColumns.indexOf('url');
+        const addedOnIndex = allColumns.indexOf('added_on');
+        if (urlIndex !== -1 && addedOnIndex !== -1) {
+          [allColumns[urlIndex], allColumns[addedOnIndex]] = [allColumns[addedOnIndex], allColumns[urlIndex]];
+        }
+        // Add feedback and notes columns at the end
+        allColumns.push('feedback');
+        allColumns.push('notes');
+        columnOrder = allColumns;
+
+        filteredData = [...data];
+        applyFilters();
+        sortData('added_on', false);
+      }
+    } catch (err) {
+      error = err.message;
+      console.error('Fetch error:', err);
+    } finally {
+      loading = false;
+    }
+  }
+
+  // Reactive logging to debug rendering
+  $: console.log('🎯 Reactive update - data.length:', data.length, 'filteredData.length:', filteredData.length, 'viewMode:', viewMode);
 
   // Define column order (collections at the end)
   let columnOrder = [];
@@ -72,10 +193,119 @@
     return p?.sample_size ?? p?.sample ?? 'N/A';
   }
 
-  function handleFeedback(item, isCorrect) {
-    const key = `${item.url}_${item.match_poll_id || 'no_match'}`;
-    feedback[key] = isCorrect ? 'correct' : 'incorrect';
-    feedback = {...feedback}; // trigger reactivity
+  function isValidUrl(urlString) {
+    if (!urlString) return false;
+    try {
+      const url = new URL(urlString);
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  function formatPollDate(poll) {
+    if (!poll) return 'N/A';
+    
+    const startDate = poll.start_date || poll.date;
+    const endDate = poll.end_date;
+    
+    if (!startDate) return 'N/A';
+    
+    if (endDate && endDate !== startDate) {
+      return `${startDate} to ${endDate}`;
+    } else {
+      return startDate;
+    }
+  }
+
+  async function handleFeedback(item, feedbackType) {
+    console.log('Handling feedback:', { id: item.id, feedbackType, item });
+    try {
+      // Use environment variable for production API base
+      const PROD_API_BASE = import.meta.env.VITE_API_BASE || 'https://pollfinder-production.up.railway.app';
+      
+      // Use Railway API in production, local API in development
+      const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+      const baseApiUrl = isLocalhost
+        ? 'http://localhost:3001/api/polls'
+        : window.location.hostname.includes('192.168') || window.location.hostname.includes('127.0')
+          ? `http://${window.location.hostname}:3001/api/polls`
+          : `${PROD_API_BASE}/api/polls`;
+      const feedbackApiUrl = baseApiUrl.replace('/polls', '/feedback');
+      
+      console.log('Sending feedback to:', feedbackApiUrl);
+      
+      const response = await fetch(feedbackApiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          id: item.id,
+          feedback: feedbackType
+        })
+      });
+
+      console.log('Response status:', response.status);
+      
+      if (response.ok) {
+        console.log('Feedback saved successfully');
+        // Update local state to show the feedback immediately
+        item.feedback = feedbackType;
+        data = [...data]; // trigger reactivity
+        filteredData = [...filteredData]; // also update filtered data
+      } else {
+        const errorText = await response.text();
+        console.error('Failed to save feedback:', response.status, errorText);
+      }
+    } catch (error) {
+      console.error('Error saving feedback:', error);
+    }
+  }
+
+  async function handleNotes(item, notesText) {
+    console.log('Handling notes:', { id: item.id, notesText, item });
+    try {
+      // Use environment variable for production API base
+      const PROD_API_BASE = import.meta.env.VITE_API_BASE || 'https://pollfinder-production.up.railway.app';
+      
+      // Use Railway API in production, local API in development
+      const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+      const baseApiUrl = isLocalhost
+        ? 'http://localhost:3001/api/polls'
+        : window.location.hostname.includes('192.168') || window.location.hostname.includes('127.0')
+          ? `http://${window.location.hostname}:3001/api/polls`
+          : `${PROD_API_BASE}/api/polls`;
+      const notesApiUrl = baseApiUrl.replace('/polls', '/notes');
+      
+      console.log('Sending notes to:', notesApiUrl);
+      
+      const response = await fetch(notesApiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          id: item.id,
+          notes: notesText
+        })
+      });
+
+      console.log('Response status:', response.status);
+      
+      if (response.ok) {
+        console.log('Notes saved successfully');
+        // Update local state to show the notes immediately
+        item.notes = notesText;
+        data = [...data]; // trigger reactivity
+        filteredData = [...filteredData]; // also update filtered data
+      } else {
+        const errorText = await response.text();
+        console.error('Failed to save notes:', response.status, errorText);
+      }
+    } catch (error) {
+      console.error('Error saving notes:', error);
+    }
   }
 
   function getFeedbackKey(item) {
@@ -129,13 +359,18 @@
   }
 
   function applyFilters() {
+    console.log('🔍 applyFilters called - data.length:', data.length, 'dateFilter:', dateFilter, 'collectionFilter:', collectionFilter);
     filteredData = data.filter(item => {
+      // Filter by date using local time conversion
       if (dateFilter && item.added_on) {
         const d = new Date(item.added_on);
+        // Convert UTC timestamp to local date
         const itemDateStr = d.getFullYear() + '-' +
                             String(d.getMonth() + 1).padStart(2, '0') + '-' +
                             String(d.getDate()).padStart(2, '0');
-        if (itemDateStr !== dateFilter) return false;
+        if (itemDateStr !== dateFilter) {
+          return false;
+        }
       }
       if (collectionFilter) {
         const labels = extractCollections(item.collections).map(s => s.toLowerCase());
@@ -143,6 +378,11 @@
       }
       return true;
     });
+
+    console.log('🔍 After applyFilters - filteredData.length:', filteredData.length);
+    if (filteredData.length > 0) {
+      console.log('✅ Polls that passed date filter:', filteredData.map(p => ({ id: p.id, added_on: p.added_on })));
+    }
 
     if (sortColumn) sortData(sortColumn, false);
     
@@ -153,12 +393,87 @@
   function groupDataByPollId() {
     groupedData = {};
     filteredData.forEach(item => {
-      const pollId = item.match_poll_id || 'No Match';
+      // Use match_poll_id if available, otherwise fall back to temp_poll_id, otherwise 'No Match'
+      const pollId = item.match_poll_id || item.temp_poll_id || 'No Match';
       if (!groupedData[pollId]) {
         groupedData[pollId] = [];
       }
       groupedData[pollId].push(item);
     });
+    
+    // Sort items within each group
+    Object.keys(groupedData).forEach(pollId => {
+      groupedData[pollId] = sortGroupItems(groupedData[pollId]);
+    });
+
+    // Get sorted keys in the same order as the display
+    const sortedKeys = Object.entries(groupedData).sort(([a, itemsA], [b, itemsB]) => {
+      const aIsNoMatch = a === 'No Match';
+      const bIsNoMatch = b === 'No Match';
+      if (aIsNoMatch !== bIsNoMatch) return aIsNoMatch ? 1 : -1;
+      const countDiff = itemsB.length - itemsA.length;
+      if (countDiff !== 0) return countDiff;
+      return a.localeCompare(b);
+    }).map(([key]) => key);
+    
+    // Collapse all groups except the first one
+    collapsedGroups = {};
+    sortedKeys.forEach((key, index) => {
+      collapsedGroups[key] = index !== 0 && key !== 'No Match'; // Collapse all except first and 'No Match'
+    });
+  }
+
+  function sortGroupItems(items) {
+    return [...items].sort((a, b) => {
+      let aVal, bVal;
+      
+      if (groupSortColumn === 'added_on') {
+        aVal = new Date(a.added_on);
+        bVal = new Date(b.added_on);
+      } else if (groupSortColumn === 'url') {
+        aVal = a.url;
+        bVal = b.url;
+      } else if (groupSortColumn === 'pollster' || groupSortColumn === 'sponsor') {
+        // Get pollster/sponsor from polls array for table display
+        const pollsA = Array.isArray(a.polls) ? a.polls : [a.polls];
+        const pollsB = Array.isArray(b.polls) ? b.polls : [b.polls];
+        const pollA = pollsA[0] ? (typeof pollsA[0] === 'string' ? JSON.parse(pollsA[0]) : pollsA[0]) : {};
+        const pollB = pollsB[0] ? (typeof pollsB[0] === 'string' ? JSON.parse(pollsB[0]) : pollsB[0]) : {};
+        aVal = pollA[groupSortColumn] || '';
+        bVal = pollB[groupSortColumn] || '';
+      } else if (groupSortColumn === 'confidence') {
+        const matchDataA = typeof a.match_results === 'string' ? JSON.parse(a.match_results) : a.match_results;
+        const matchDataB = typeof b.match_results === 'string' ? JSON.parse(b.match_results) : b.match_results;
+        aVal = matchDataA?.matches?.[0]?.confidence || 0;
+        bVal = matchDataB?.matches?.[0]?.confidence || 0;
+      } else {
+        aVal = a[groupSortColumn];
+        bVal = b[groupSortColumn];
+      }
+      
+      if (aVal == null) return 1;
+      if (bVal == null) return -1;
+      if (aVal < bVal) return groupSortDirection === 'asc' ? -1 : 1;
+      if (aVal > bVal) return groupSortDirection === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }
+
+  function sortGroupedData(column) {
+    if (groupSortColumn === column) {
+      groupSortDirection = groupSortDirection === 'asc' ? 'desc' : 'asc';
+    } else {
+      groupSortColumn = column;
+      groupSortDirection = 'asc';
+    }
+    
+    // Re-sort all groups
+    Object.keys(groupedData).forEach(pollId => {
+      groupedData[pollId] = sortGroupItems(groupedData[pollId]);
+    });
+    
+    // Trigger reactivity
+    groupedData = { ...groupedData };
   }
 
   function sortData(column, toggleDirection = true) {
@@ -185,58 +500,7 @@
     });
   }
 
-  onMount(async () => {
-    const apiUrl = `https://pollfinderpdfs.s3.us-east-2.amazonaws.com/pollfinder/matched_polls.json?t=${Date.now()}`;
-
-    try {
-      const response = await fetch(apiUrl);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const parsed = await response.json();
-
-      if (typeof parsed === 'object' && !Array.isArray(parsed)) {
-        const columns = Object.keys(parsed);
-        const firstColumn = parsed[columns[0]];
-        const numRows = Object.keys(firstColumn).length;
-        data = [];
-        for (let i = 0; i < numRows; i++) {
-          const row = {};
-          columns.forEach(col => (row[col] = parsed[col][i]));
-          data.push(row);
-        }
-      } else if (Array.isArray(parsed)) {
-        data = parsed;
-      }
-
-      if (data.length > 0) {
-        const collectionsSet = new Map();
-        data.forEach(item => {
-          extractCollections(item.collections).forEach(label => {
-            const key = label.toLowerCase();
-            if (!collectionsSet.has(key)) collectionsSet.set(key, label);
-          });
-        });
-        uniqueCollections = Array.from(collectionsSet.values()).sort((a, b) => a.localeCompare(b));
-
-        let allColumns = Object.keys(data[0]).filter(f => f !== 'id' && f !== 'num_polls_found' && f !== 'collections');
-        const urlIndex = allColumns.indexOf('url');
-        const addedOnIndex = allColumns.indexOf('added_on');
-        if (urlIndex !== -1 && addedOnIndex !== -1) {
-          [allColumns[urlIndex], allColumns[addedOnIndex]] = [allColumns[addedOnIndex], allColumns[urlIndex]];
-        }
-        // Add feedback column at the end
-        allColumns.push('feedback');
-        columnOrder = allColumns;
-
-        filteredData = [...data];
-        applyFilters();
-        sortData('added_on', false);
-      }
-      loading = false;
-    } catch (err) {
-      error = err.message;
-      loading = false;
-    }
-  });
+  onMount(fetchData);
 </script>
 
 <!-- ====== HEADER ====== -->
@@ -269,9 +533,9 @@
       <div class="filters">
         <div class="field">
           <label for="date">Date</label>
-          <input id="date" type="date" bind:value={dateFilter} on:change={applyFilters} />
+          <input id="date" type="date" bind:value={dateFilter} on:change={fetchData} />
           {#if dateFilter}
-            <button class="btn ghost" on:click={() => { dateFilter = ''; applyFilters(); }}>Clear</button>
+            <button class="btn ghost" on:click={() => { dateFilter = ''; fetchData(); }}>Clear</button>
           {/if}
         </div>
 
@@ -282,14 +546,6 @@
             {#each uniqueCollections as collection}
               <option value={collection}>{collection}</option>
             {/each}
-          </select>
-        </div>
-
-        <div class="field">
-          <label for="view">View</label>
-          <select id="view" bind:value={viewMode}>
-            <option value="table">Table View</option>
-            <option value="grouped">Grouped by Match ID</option>
           </select>
         </div>
 
@@ -304,6 +560,37 @@
     </div>
   </div>
 </article>
+
+<!-- ====== VIEW TOGGLE ====== -->
+<div class="container">
+  <div class="view-toggle">
+    <button 
+      class="view-btn" 
+      class:active={viewMode === 'table'}
+      on:click={() => viewMode = 'table'}
+    >
+      <svg class="view-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="3" width="7" height="7"></rect>
+        <rect x="14" y="3" width="7" height="7"></rect>
+        <rect x="14" y="14" width="7" height="7"></rect>
+        <rect x="3" y="14" width="7" height="7"></rect>
+      </svg>
+      Table View
+    </button>
+    <button 
+      class="view-btn" 
+      class:active={viewMode === 'grouped'}
+      on:click={() => viewMode = 'grouped'}
+    >
+      <svg class="view-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="3" width="18" height="4"></rect>
+        <rect x="3" y="9" width="18" height="4"></rect>
+        <rect x="3" y="15" width="18" height="4"></rect>
+      </svg>
+      Grouped by Match ID
+    </button>
+  </div>
+</div>
 
 <!-- ====== DATA TABLE ====== -->
 <main id="data" class="container">
@@ -321,7 +608,7 @@
           <thead>
             <tr>
               {#each columnOrder as field}
-                <th class:sortable={field !== 'feedback'} on:click={() => field !== 'feedback' && sortData(field)}>
+                <th class:sortable={field !== 'feedback' && field !== 'notes'} on:click={() => field !== 'feedback' && field !== 'notes' && sortData(field)}>
                   {#if field === 'polls'}
                     🤖 Extracted Polls
                   {:else if field === 'match_results'}
@@ -330,10 +617,12 @@
                     Matched Poll ID
                   {:else if field === 'feedback'}
                     Feedback
+                  {:else if field === 'notes'}
+                    Notes
                   {:else}
                     {field}
                   {/if}
-                  {#if sortColumn === field && field !== 'feedback'}
+                  {#if sortColumn === field && field !== 'feedback' && field !== 'notes'}
                     <span class="sort">{sortDirection === 'asc' ? '▲' : '▼'}</span>
                   {/if}
                 </th>
@@ -357,6 +646,8 @@
                       {@const dateObj = new Date(item[field])}
                       {@const dateStr = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                       {@const timeStr = dateObj.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
+
+
                       <div class="datetime">
                         <div class="date">{dateStr}</div>
                         <div class="time">{timeStr}</div>
@@ -365,6 +656,12 @@
                       <!-- <div class="poll-id-badge"> -->
                         <span class="badge-value">{item[field]}</span>
                       <!-- </div> -->
+                    {:else if field === 'match_results' && !item[field]}
+                      
+                      <div style="margin-top:6px;">
+                        <span class="badge-potential">New Poll?</span>
+                      </div>
+                      <span class="muted">No match found</span>
                     {:else if field === 'match_results' && item[field]}
                       {#if typeof item[field] === 'string'}
                         {@const parsed = JSON.parse(item[field])}
@@ -382,7 +679,7 @@
                             </div>
                             <div class="match-field">
                               <span class="field-label">Date:</span>
-                              <span class="field-value">{pollWithoutId.date || 'N/A'}</span>
+                              <span class="field-value">{formatPollDate(pollWithoutId)}</span>
                             </div>
                             <div class="match-field">
                               <span class="field-label">Location:</span>
@@ -394,7 +691,12 @@
                             </div>
                           </div>
                         {:else}
-                          <span class="muted">No match found</span>
+                          <!-- Show a 'Potentially New Poll' badge when no matched poll exists -->
+                          <div style="margin-top:6px;">
+                            <span class="badge-potential">Potentially New Poll</span>
+                          </div>
+                                                    <span class="muted">No match found</span>
+
                         {/if}
                       {:else if item[field].matches && item[field].matches.length > 0 && item[field].matches[0].matched_poll}
                         {@const matchedPoll = item[field].matches[0].matched_poll}
@@ -410,7 +712,7 @@
                           </div>
                           <div class="match-field">
                             <span class="field-label">Date:</span>
-                            <span class="field-value">{pollWithoutId.date || 'N/A'}</span>
+                            <span class="field-value">{formatPollDate(pollWithoutId)}</span>
                           </div>
                           <div class="match-field">
                             <span class="field-label">Location:</span>
@@ -441,7 +743,7 @@
                               </div>
                               <div class="match-field">
                                 <span class="field-label">Date:</span>
-                                <span class="field-value">{poll.date || 'N/A'}</span>
+                                <span class="field-value">{formatPollDate(poll)}</span>
                               </div>
                               <div class="match-field">
                                 <span class="field-label">Location:</span>
@@ -452,7 +754,7 @@
                                 <span class="field-value">{getSample(poll)}</span>
                               </div>
 
-                              {#if poll.poll_url}
+                              {#if poll.poll_url && isValidUrl(poll.poll_url)}
                                 <div class="match-field">
                                   <span class="field-label">Link:</span>
                                   <span class="field-value">
@@ -481,18 +783,35 @@
                       <div class="feedback-buttons">
                         <button 
                           class="btn-feedback" 
-                          class:selected={feedback[feedbackKey] === 'correct'}
-                          on:click={() => handleFeedback(item, true)}
+                          class:selected={item.feedback === 'correct'}
+                          on:click={() => handleFeedback(item, 'correct')}
                         >
                           ✓ Correct
                         </button>
                         <button 
                           class="btn-feedback" 
-                          class:selected={feedback[feedbackKey] === 'incorrect'}
-                          on:click={() => handleFeedback(item, false)}
+                          class:selected={item.feedback === 'incorrect'}
+                          on:click={() => handleFeedback(item, 'incorrect')}
                         >
                           ✗ Incorrect
                         </button>
+                        <button 
+                          class="btn-feedback btn-not-interested" 
+                          class:selected={item.feedback === 'not_interested'}
+                          on:click={() => handleFeedback(item, 'not_interested')}
+                        >
+                          ⊘ Not Interested
+                        </button>
+                      </div>
+                    {:else if field === 'notes'}
+                      <div class="notes-container">
+                        <textarea 
+                          class="notes-input" 
+                          placeholder="Add notes..."
+                          value={item.notes || ''}
+                          on:blur={(e) => handleNotes(item, e.target.value)}
+                          rows="3"
+                        ></textarea>
                       </div>
                     {:else if typeof item[field] === 'object' && item[field] !== null}
                       <pre class="json">{JSON.stringify(item[field], null, 2)}</pre>
@@ -510,63 +829,99 @@
     {:else}
       <!-- Grouped View -->
       <div class="grouped-view">
-        {#each Object.entries(groupedData).sort(([a], [b]) => {
-          if (a === 'No Match') return 1;
-          if (b === 'No Match') return -1;
+        {#each Object.entries(groupedData).sort(([a, itemsA], [b, itemsB]) => {
+          // Prefer matched groups (not 'No Match') first
+          const aIsNoMatch = a === 'No Match';
+          const bIsNoMatch = b === 'No Match';
+          if (aIsNoMatch !== bIsNoMatch) return aIsNoMatch ? 1 : -1;
+
+          // Then sort by number of articles (descending)
+          const countDiff = itemsB.length - itemsA.length;
+          if (countDiff !== 0) return countDiff;
+
+          // Finally sort by poll ID
           return a.localeCompare(b);
         }) as [pollId, items]}
           <div class="group-card">
-            <h3 class="group-header">
-              <span class="group-id">Match ID: {pollId}</span>
-              <span class="group-count">{items.length} article{items.length !== 1 ? 's' : ''}</span>
-            </h3>
-            
-            {#if pollId !== 'No Match' && items[0].match_results}
-              {#if typeof items[0].match_results === 'string'}
-                {@const firstItem = items[0]}
-                {@const parsed = JSON.parse(firstItem.match_results)}
-                {#if parsed.matches && parsed.matches.length > 0 && parsed.matches[0].matched_poll}
-                  {@const matchedPoll = parsed.matches[0].matched_poll}
-                  {@const {poll_id, ...pollWithoutId} = matchedPoll}
-                  <div class="match-card group-match">
-                    <h4 class="match-title">📊 Matched Poll (Database)</h4>
-                    <div class="match-field">
-                      <span class="field-label">Pollster:</span>
-                      <span class="field-value">{pollWithoutId.pollster || 'N/A'}</span>
-                    </div>
-                    <div class="match-field">
-                      <span class="field-label">Sponsor:</span>
-                      <span class="field-value">{pollWithoutId.sponsor || 'N/A'}</span>
-                    </div>
-                    <div class="match-field">
-                      <span class="field-label">Date:</span>
-                      <span class="field-value">{pollWithoutId.date || 'N/A'}</span>
-                    </div>
-                    <div class="match-field">
-                      <span class="field-label">Location:</span>
-                      <span class="field-value">{pollWithoutId.location || 'N/A'}</span>
-                    </div>
-                    <div class="match-field">
-                      <span class="field-label">Sample:</span>
-                      <span class="field-value">{pollWithoutId.sample_size || 'N/A'}</span>
-                    </div>
-                  </div>
-                {/if}
-              {/if}
-            {/if}
+            <div class="group-header-row" on:click={() => toggleGroup(pollId)} role="button" tabindex="0">
+              <button class="collapse-btn" aria-label={collapsedGroups[pollId] ? 'Expand' : 'Collapse'}>
+                {collapsedGroups[pollId] ? '▶' : '▼'}
+              </button>
+              <div class="header-content">
+                {#if pollId !== 'No Match'}
+                  {@const firstItem = items[0]}
+                  {@const matchData = typeof firstItem.match_results === 'string' ? JSON.parse(firstItem.match_results) : firstItem.match_results}
+                  {@const pollster = matchData?.matches?.[0]?.matched_poll?.pollster || 'N/A'}
+                  {@const sponsor = matchData?.matches?.[0]?.matched_poll?.sponsor || 'N/A'}
+                  {@const startDate = matchData?.matches?.[0]?.matched_poll?.start_date || matchData?.matches?.[0]?.matched_poll?.date || 'N/A'}
+                  {@const endDate = matchData?.matches?.[0]?.matched_poll?.end_date || 'N/A'}
+                  {@const dateStr = endDate !== 'N/A' && endDate !== startDate ? `${startDate.slice(5)} to ${endDate.slice(5)}` : startDate.slice(5)}    
+                  {@const sampleSize = matchData?.matches?.[0]?.matched_poll?.sample_size || matchData?.matches?.[0]?.matched_poll?.sample || 'N/A'}
+                  
+                  <span class="poll-id-label">Poll ID:</span>
+                  <span class="poll-id-value">{pollId}</span>
+                  <span class="pollster-separator">•</span>
+                  
+                  <span class="pollster-value">{pollster}</span>
+                  <span class="pollster-separator">•</span>
+                  
+                  {#if sponsor !== 'N/A'}
+                    <span class="pollster-value">{sponsor}</span>
+                    <span class="pollster-separator">•</span>
+                  {/if}
 
+                  <span class="pollster-value">{dateStr}</span>
+                  <span class="pollster-separator">•</span>
+
+                  
+
+                {:else}
+                  <span class="poll-id-label">Status:</span>
+                  <span class="poll-id-value no-match">No Match</span>
+                {/if}
+              </div>
+              <span class="article-count">{items.length} article{items.length !== 1 ? 's' : ''}</span>
+            </div>
+
+            {#if !collapsedGroups[pollId]}
             <div class="group-table-wrapper">
               <table class="group-table">
                 <thead>
                   <tr>
-                    <th>Added On</th>
-                    <th>URL</th>
-                    <th>Pollster</th>
-                    <th>Sponsor</th>
-                    <th>Start Date</th>
-                    <th>End Date</th>
+                    <th class="sortable" on:click={() => sortGroupedData('added_on')}>
+                      Added On
+                      {#if groupSortColumn === 'added_on'}
+                        <span class="sort">{groupSortDirection === 'asc' ? '▲' : '▼'}</span>
+                      {/if}
+                    </th>
+                    <th class="sortable" on:click={() => sortGroupedData('url')}>
+                      URL
+                      {#if groupSortColumn === 'url'}
+                        <span class="sort">{groupSortDirection === 'asc' ? '▲' : '▼'}</span>
+                      {/if}
+                    </th>
+                    <th class="sortable" on:click={() => sortGroupedData('pollster')}>
+                      Pollster
+                      {#if groupSortColumn === 'pollster'}
+                        <span class="sort">{groupSortDirection === 'asc' ? '▲' : '▼'}</span>
+                      {/if}
+                    </th>
+                    <th class="sortable" on:click={() => sortGroupedData('sponsor')}>
+                      Sponsor
+                      {#if groupSortColumn === 'sponsor'}
+                        <span class="sort">{groupSortDirection === 'asc' ? '▲' : '▼'}</span>
+                      {/if}
+                    </th>
+                    <th>Date</th>
                     <th>Sample Size</th>
-                    <th>Confidence</th>
+                    {#if pollId === 'No Match'}
+                      <th class="sortable" on:click={() => sortGroupedData('temp_poll_id')}>
+                        Temp Poll ID
+                        {#if groupSortColumn === 'temp_poll_id'}
+                          <span class="sort">{groupSortDirection === 'asc' ? '▲' : '▼'}</span>
+                        {/if}
+                      </th>
+                    {/if}
                   </tr>
                 </thead>
                 <tbody>
@@ -580,7 +935,6 @@
                     {@const pollsArray = Array.isArray(item.polls) ? item.polls : [item.polls]}
                     {#if item.match_results}
                       {@const matchData = typeof item.match_results === 'string' ? JSON.parse(item.match_results) : item.match_results}
-                      {@const confidence = matchData?.matches?.[0]?.confidence || 'N/A'}
                       {#each pollsArray as rawPoll}
                         {@const poll = coercePoll(rawPoll)}
                         {#if poll}
@@ -598,9 +952,19 @@
                             <td>{poll.pollster || 'N/A'}</td>
                             <td>{poll.sponsor || 'N/A'}</td>
                             <td>{poll.start_date || poll.date || 'N/A'}</td>
-                            <td>{poll.end_date || 'N/A'}</td>
                             <td>{getSample(poll)}</td>
-                            <td>{typeof confidence === 'number' ? confidence.toFixed(2) : confidence}</td>
+                            {#if pollId === 'No Match'}
+                              <td class="temp-poll-id-cell">
+                                {#if item.temp_poll_id}
+                                  <div class="temp-id-container">
+                                    <span class="temp-id-badge">{item.temp_poll_id}</span>
+                                    <span class="new-poll-tag">New Poll</span>
+                                  </div>
+                                {:else}
+                                  N/A
+                                {/if}
+                              </td>
+                            {/if}
                           </tr>
                         {/if}
                       {/each}
@@ -622,9 +986,19 @@
                             <td>{poll.pollster || 'N/A'}</td>
                             <td>{poll.sponsor || 'N/A'}</td>
                             <td>{poll.start_date || poll.date || 'N/A'}</td>
-                            <td>{poll.end_date || 'N/A'}</td>
                             <td>{getSample(poll)}</td>
-                            <td>N/A</td>
+                            {#if pollId === 'No Match'}
+                              <td class="temp-poll-id-cell">
+                                {#if item.temp_poll_id}
+                                  <div class="temp-id-container">
+                                    <span class="temp-id-badge">{item.temp_poll_id}</span>
+                                    <span class="new-poll-tag">New Poll</span>
+                                  </div>
+                                {:else}
+                                  N/A
+                                {/if}
+                              </td>
+                            {/if}
                           </tr>
                         {/if}
                       {/each}
@@ -633,6 +1007,7 @@
                 </tbody>
               </table>
             </div>
+            {/if}
           </div>
         {/each}
       </div>
@@ -663,7 +1038,7 @@
     --brand-2:#0b3a8f;
     --accent:#236bb1;
     --warn:#b85d20;
-    --radius:14px;
+    /* --radius:14px; */
     --shadow:0 6px 24px rgba(17,24,39,.06);
   }
 
@@ -674,7 +1049,7 @@
   .dek{font-size:1.125rem; color:var(--ink-2); max-width:60ch; margin:.25rem 0 1.25rem}
   a{color:var(--brand); text-decoration:none}
   a:hover{text-decoration:underline}
-  .muted{color:var(--ink-3)}
+  .muted{color:var(--ink-3); font-size:0.85rem; line-height:1.2; margin-top: 2; font-style:italic}
 
   .container{max-width:1152px; margin:0 auto; padding:0 20px}
 
@@ -709,6 +1084,47 @@
   }
   input[type="date"]:focus, select:focus{border-color:#93c5fd}
 
+  /* VIEW TOGGLE */
+  .view-toggle{
+    display:flex;
+    gap:2px;
+    background:#f1f5f9;
+    padding:4px;
+    /* border-radius:12px; */
+    margin:20px 0;
+    width:fit-content;
+    border:1px solid #e2e8f0;
+  }
+  .view-btn{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    padding:10px 16px;
+    border:none;
+    background:transparent;
+    color:var(--ink-2);
+    font-weight:600;
+    font-size:0.9rem;
+    cursor:pointer;
+    /* border-radius:8px; */
+    transition:all .2s ease;
+    white-space:nowrap;
+  }
+  .view-btn:hover{
+    background:rgba(255,255,255,0.5);
+    color:var(--ink);
+  }
+  .view-btn.active{
+    background:#fff;
+    color:var(--brand);
+    box-shadow:0 2px 4px rgba(0,0,0,0.1);
+  }
+  .view-icon{
+    width:18px;
+    height:18px;
+    flex-shrink:0;
+  }
+
   .btn{
     border:1px solid var(--line);
     background:#fff;
@@ -734,7 +1150,7 @@
     font-weight:600;
     cursor:pointer;
     transition:all .2s ease;
-    border-radius:4px;
+    /* border-radius:4px; */
   }
   .btn-feedback:hover{
     border-color:#94a3b8;
@@ -747,6 +1163,38 @@
   .btn-feedback:nth-child(2).selected{
     background:#ef4444;
     border-color:#dc2626;
+  }
+  .btn-feedback.btn-not-interested.selected{
+    background:#a9adb5;
+    border-color:#8d9199;
+    color:#fff;
+  }
+
+  /* NOTES */
+  .notes-container{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+  }
+  .notes-input{
+    padding:8px 12px;
+    border:1px solid #cbd5e1;
+    /* border-radius:4px; */
+    font-size:0.85rem;
+    font-family:inherit;
+    background:#fff;
+    transition:border-color .2s ease;
+    resize:vertical;
+    min-height:60px;
+    max-width:250px;
+  }
+  .notes-input:focus{
+    outline:none;
+    border-color:#3b82f6;
+    box-shadow:0 0 0 3px rgba(59, 130, 246, 0.1);
+  }
+  .notes-input::placeholder{
+    color:#94a3b8;
   }
 
   /* CARDS */
@@ -842,6 +1290,18 @@
     font-family:monospace;
   }
 
+  .badge-potential{
+    display:inline-block;
+    padding:4px 8px;
+    margin-bottom: 0.5rem;
+    font-size:0.75rem;
+    font-weight:600;
+    color:#374151; /* slate-700 */
+    background:#fffa77; /* gray-100 */
+    border:1px solid #cf643e; /* gray-200 */
+    /* border-radius:9999px; */
+  }
+
   .match-card{
     display:flex;
     flex-direction:column;
@@ -890,32 +1350,100 @@
   .grouped-view{
     display:flex;
     flex-direction:column;
-    gap:24px;
+    gap:32px;
   }
   .group-card{
     background:var(--paper);
-    border:1px solid var(--line);
-    padding:20px;
+    border:1px solid #e2e8f0;
+    padding:0;
+    overflow:hidden;
+    box-shadow:0 1px 3px rgba(0,0,0,0.08);
+    transition:all .2s ease;
   }
-  .group-header{
+  .group-card:hover{
+    box-shadow:0 2px 8px rgba(0,0,0,0.12);
+    border-color:#cbd5e1;
+  }
+
+  .group-header-row{
     display:flex;
-    justify-content:space-between;
     align-items:center;
-    margin:0 0 16px;
-    padding-bottom:12px;
+    gap:16px;
+    padding:14px 20px;
+    background:linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
+    border-bottom:1px solid #cbd5e1;
+    cursor:pointer;
+    transition:background 0.2s ease;
   }
-  .group-id{
-    font-size:1.1rem;
+  .group-header-row:hover{
+    background:linear-gradient(135deg, #e2e8f0 0%, #cbd5e1 100%);
+  }
+
+  .collapse-btn{
+    background:transparent;
+    border:1px solid #cbd5e1;
+    padding:4px 8px;
+    font-size:0.85rem;
+    cursor:pointer;
+    transition:all 0.2s ease;
+    color:var(--ink-2);
+    flex-shrink:0;
+  }
+  .collapse-btn:hover{
+    background:#fff;
+    border-color:#94a3b8;
+  }
+
+  .header-content{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    flex:1;
+  }
+  .poll-id-label{
+    font-size:0.75rem;
     font-weight:700;
-    color:var(--ink);
+    color:#64748b;
+    text-transform:uppercase;
+    letter-spacing:0.05em;
   }
-  .group-count{
+  .poll-id-value{
+    font-size:0.95rem;
+    font-weight:700;
+    color:var(--brand);
+  }
+  .poll-id-value.no-match{
+    color:#ef4444;
+  }
+
+  .pollster-separator{
+    color:#cbd5e1;
+    margin:0 8px;
+  }
+  .pollster-label{
+    font-size:0.75rem;
+    font-weight:700;
+    color:#64748b;
+    text-transform:uppercase;
+    letter-spacing:0.05em;
+  }
+  .pollster-value{
     font-size:0.9rem;
-    color:var(--ink-3);
     font-weight:600;
+    color:#1f4db3;
   }
-  .group-match{
-    margin-bottom:20px;
+
+  .article-count{
+    margin-left:auto;
+    font-size:0.8rem;
+    font-weight:600;
+    color:#64748b;
+    background:rgba(255,255,255,0.6);
+    padding:4px 10px;
+    border:1px solid #cbd5e1;
+  }
+  .group-card .match-card{
+    display:none;
   }
   .match-title{
     font-size:0.95rem;
@@ -931,31 +1459,71 @@
   }
   .group-table-wrapper{
     overflow-x:auto;
-    margin-top:16px;
+    margin-top:0;
+    border:1px solid rgba(0,0,0,0.08);
+    /* border-radius:12px; */
+    overflow:hidden;
+    box-shadow:0 2px 8px rgba(0,0,0,0.06);
+    background:#fff;
   }
   .group-table{
     width:100%;
     border-collapse:collapse;
-    font-size:0.9rem;
-  }
-  .group-table thead{
-    background:#f1f5f9;
-    border-bottom:2px solid var(--line);
+    font-size:0.85rem;
+    background:#fff;
+    table-layout:fixed;
   }
   .group-table th{
     text-align:left;
-    padding:10px 12px;
+    padding:16px 20px;
     font-weight:700;
     color:var(--ink-2);
     white-space:nowrap;
+    font-size:0.8rem;
+    text-transform:uppercase;
+    letter-spacing:0.02em;
+    width:16.66%;
   }
   .group-table td{
-    padding:10px 12px;
-    border-bottom:1px solid #e2e8f0;
+    padding:16px 20px;
+    border-bottom:1px solid rgba(0,0,0,0.06);
     color:var(--ink);
+    vertical-align:top;
+  }
+  .group-table tbody tr{
+    transition:all 0.2s ease;
   }
   .group-table tbody tr:hover{
-    background:#f8fafc;
+    background:linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+    transform:translateY(-1px);
+    box-shadow:0 4px 12px rgba(0,0,0,0.08);
+  }
+  
+  .temp-id-container{
+    display:flex;
+    gap:8px;
+    align-items:center;
+    flex-wrap:wrap;
+  }
+  .temp-id-badge{
+    font-family:monospace;
+    font-size:0.8rem;
+    color:var(--brand);
+    font-weight:600;
+    background:#eef2ff;
+    padding:4px 8px;
+    border-radius:4px;
+    border:1px solid #c7d2fe;
+  }
+  .new-poll-tag{
+    font-size:0.7rem;
+    font-weight:700;
+    color:#fff;
+    background:#10b981;
+    padding:2px 6px;
+    border-radius:3px;
+    text-transform:uppercase;
+    letter-spacing:0.5px;
   }
   .date-cell{
     white-space:nowrap;
@@ -1014,4 +1582,14 @@
 
   .table-card .data-table a{color:var(--warn)}
   .table-card .data-table a:hover{opacity:.9}
+    .table-card{
+    margin:18px 0 48px;
+    width:100%;
+    overflow-x:visible;
+  }
+  .table-card .data-table{
+    table-layout:auto;
+    width:100%;
+    min-width:auto;
+  }
 </style>

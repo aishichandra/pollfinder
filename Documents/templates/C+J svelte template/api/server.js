@@ -6,7 +6,14 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
-app.use(cors());
+
+// CORS configuration - use FRONTEND_ORIGIN env var in production
+const allowedOrigin = process.env.FRONTEND_ORIGIN || '*';
+app.use(cors({
+  origin: allowedOrigin,
+  credentials: true
+}));
+
 app.use(express.json());
 
 const MONGODB_URI = process.env.MONGODB_CONNECTION_STRING;
@@ -47,10 +54,18 @@ app.get('/api/polls', async (req, res) => {
       num_polls_found: { $lt: 3 }
     };
     
-    // Add date filter if provided (added_on is stored as ISO string)
+    // Add date filter if provided (added_on is stored as Date object)
     if (date) {
-      // Match dates that start with the given date string (YYYY-MM-DD)
-      query.added_on = { $regex: `^${date}` };
+      // Create date range for the entire day (00:00:00 to 23:59:59)
+      const startDate = new Date(date);
+      startDate.setHours(0, 0, 0, 0);
+      const endDate = new Date(date);
+      endDate.setHours(23, 59, 59, 999);
+      
+      query.added_on = { 
+        $gte: startDate,
+        $lte: endDate
+      };
     }
     
     // Add collection filter if provided
@@ -73,6 +88,8 @@ app.get('/api/polls', async (req, res) => {
       polls_mentioned: poll.polls_mentioned,
       num_polls_found: poll.num_polls_found,
       feedback: poll.feedback || null, // Include feedback from DB
+      notes: poll.notes || null, // Include notes from DB
+      temp_poll_id: poll.temp_poll_id || null, // Include temp_poll_id
       // Create polls object from the extracted fields
       polls: poll.polls_mentioned ? [{
         pollster: poll.pollster,
@@ -132,6 +149,34 @@ app.post('/api/feedback', async (req, res) => {
   }
 });
 
+// Endpoint to update notes
+app.post('/api/notes', async (req, res) => {
+  try {
+    const { id, notes } = req.body;
+    
+    if (!id) {
+      return res.status(400).json({ error: 'Missing id' });
+    }
+    
+    console.log(`📝 Updating notes for ID ${id}`);
+    
+    const result = await expandedPolls.updateOne(
+      { id: id },
+      { $set: { notes: notes || null } }
+    );
+    
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Poll not found' });
+    }
+    
+    console.log(`✅ Notes updated successfully`);
+    res.json({ success: true, message: 'Notes updated' });
+  } catch (error) {
+    console.error('❌ Error updating notes:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
@@ -140,25 +185,10 @@ app.get('/', (req, res) => {
     endpoints: {
       health: '/api/health',
       polls: '/api/polls?date=YYYY-MM-DD',
-      feedback: 'POST /api/feedback'
+      feedback: 'POST /api/feedback',
+      notes: 'POST /api/notes'
     }
   });
-});
-
-// POST /api/notes route
-app.post('/api/notes', async (req, res) => {
-  try {
-    const { id, notes } = req.body;
-    if (!id || !notes) {
-      return res.status(400).json({ error: 'Missing id or notes' });
-    }
-    const notesCollection = db.collection('notes');
-    const result = await notesCollection.insertOne({ id, notes, createdAt: new Date() });
-    res.status(201).json({ success: true, noteId: result.insertedId });
-  } catch (error) {
-    console.error('Error saving note:', error);
-    res.status(500).json({ error: 'Failed to save note' });
-  }
 });
 
 // Health check endpoint
@@ -167,7 +197,8 @@ app.get('/api/health', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`🚀 API server running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 API server running on http://0.0.0.0:${PORT}`);
+  console.log(`   Local: http://localhost:${PORT}`);
 });// Clean API deployment Tue Oct 14 16:58:03 EDT 2025
 // Fresh deployment Tue Oct 14 17:06:47 EDT 2025
