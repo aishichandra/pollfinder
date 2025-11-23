@@ -47,6 +47,7 @@ MongoClient.connect(MONGODB_URI)
 app.get('/api/polls', async (req, res) => {
   try {
     const { date, collection } = req.query;
+    console.log('📅 Received query - date:', date, 'collection:', collection);
     
     let query = {
       // Required filters
