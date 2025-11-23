@@ -57,11 +57,11 @@ app.get('/api/polls', async (req, res) => {
     
     // Add date filter if provided (added_on is stored as Date object)
     if (date) {
-      // Create date range for the entire day (00:00:00 to 23:59:59)
-      const startDate = new Date(date);
-      startDate.setHours(0, 0, 0, 0);
-      const endDate = new Date(date);
-      endDate.setHours(23, 59, 59, 999);
+      // Create date range for the entire day in UTC (00:00:00 to 23:59:59 UTC)
+      const startDate = new Date(date + 'T00:00:00.000Z');
+      const endDate = new Date(date + 'T23:59:59.999Z');
+      
+      console.log('📅 Date filter:', { date, startDate, endDate });
       
       query.added_on = { 
         $gte: startDate,
