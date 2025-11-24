@@ -44,13 +44,11 @@
     // Use environment variable for production API base, fallback to Railway production URL
     const PROD_API_BASE = import.meta.env.VITE_API_BASE || 'https://pollfinder-production.up.railway.app';
     
-    // Use Railway API in production, local API in development
-    const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-    const apiUrl = isLocalhost
+    // Use local API only in development mode
+    const isDev = import.meta.env.DEV;
+    const apiUrl = isDev
       ? 'http://localhost:3001/api/polls'
-      : window.location.hostname.includes('192.168') || window.location.hostname.includes('127.0')
-        ? `http://${window.location.hostname}:3001/api/polls`
-        : `${PROD_API_BASE}/api/polls`;
+      : `${PROD_API_BASE}/api/polls`;
     loading = true;
     error = null;
 
